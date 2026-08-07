@@ -186,7 +186,7 @@ def recognize_face():
         return jsonify({"success": False, "error": str(exc)}), 422
     finally:
         # Remove temporary capture file
-        if os.path.exists(img_path):
+        if "img_path" in locals() and os.path.exists(img_path):
             os.remove(img_path)
 
     embeddings = load_embeddings()
@@ -241,4 +241,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("FACE_SERVICE_PORT", 5050))
     print(f"[face_service] Starting on http://127.0.0.1:{port}")
     print(f"[face_service] DeepFace available: {DEEPFACE_AVAILABLE}")
-    app.run(host="127.0.0.1", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)
