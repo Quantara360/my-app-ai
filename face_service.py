@@ -330,12 +330,32 @@ def base64_to_image_path(b64_string: str, filename: str) -> str:
     malformed base64 or an oversized payload - both are client mistakes,
     not server bugs.
     """
-    # Strip data-URL prefix if present
-    if "," in b64_string:
-        b64_string = b64_string.split(",", 1)[1]
+    # Strip a leading data-URL prefix if present. Looped (not a single split on
+    # the first comma) because a client-side bug has twice now sent this
+    # doubled up - e.g. "data:image/jpeg;base64,data:image/jpeg;base64,<data>"
+    # - which a plain split-on-first-comma turns into a mangled remainder
+    # ("data:image/jpeg;base64,<data>") that still fails validation.
+    while True:
+        prefix_match = re.match(r"^data:[^;,]*;base64,", b64_string)
+        if not prefix_match:
+            break
+        b64_string = b64_string[prefix_match.end():]
+    # Strict base64 decoding below rejects any non-alphabet character,
+    # including whitespace - so strip embedded whitespace/newlines
+    # defensively rather than surface a confusing client-facing error for it.
+    b64_string = re.sub(r"\s+", "", b64_string)
     try:
         image_bytes = base64.b64decode(b64_string, validate=True)
     except (binascii.Error, ValueError) as exc:
+        # Log a fingerprint (length + how many "data:" prefixes/commas/'='
+        # remain) rather than the payload itself - enough to diagnose a
+        # malformed-client-payload pattern without logging face photo data.
+        logger.warning(
+            "base64_to_image_path: decode failed for %s (len=%d, "
+            "'data:' count=%d, ',' count=%d, '=' count=%d): %s",
+            filename, len(b64_string), b64_string.count("data:"),
+            b64_string.count(","), b64_string.count("="), exc,
+        )
         raise ValueError(f"image_base64 is not valid base64 image data: {exc}") from exc
     if not image_bytes:
         raise ValueError("image_base64 decoded to an empty file")
