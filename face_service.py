@@ -311,11 +311,25 @@ def find_confidence(distance: float, verified: bool) -> float:
 # ---------------------------------------------------------------------------
 
 def load_embeddings() -> dict:
-    """Return {worker_id: {name, embedding, model, photo}} dict."""
+    """Return {worker_id: {name, embedding, model, photo}} dict.
+
+    Treats an empty/corrupt file the same as a missing one (empty dict)
+    instead of raising - this file has been wiped to 0 bytes by an
+    external process before, and an unhandled JSONDecodeError here used
+    to crash /recognize and /register with an uncaught 500 (no JSON
+    body at all) for every request, not just a bad one.
+    """
     if not os.path.exists(EMBEDDINGS_FILE):
         return {}
     with open(EMBEDDINGS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        raw = f.read().strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        logger.error("load_embeddings: %s contains invalid JSON - treating as empty", EMBEDDINGS_FILE)
+        return {}
 
 
 def save_embeddings(data: dict) -> None:
