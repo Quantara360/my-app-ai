@@ -118,7 +118,19 @@ MAX_ROLL_DEGREES = 20.0     # head tilt tolerance
 MAX_YAW_RATIO = 0.2         # head turn tolerance (eyes off-center of face box)
 MIN_FACE_RATIO = 0.03       # face bbox area / image area, below = too far
 MIN_FACE_WIDTH = 50         # px, below = too far / too low-res
-BLUR_THRESHOLD = 100.0      # Laplacian variance, below = too blurry
+BLUR_THRESHOLD = 40.0       # Laplacian variance, below = too blurry. The
+# commonly-cited "100" for this metric (Laplacian-of-grayscale variance)
+# comes from tutorials using full-resolution, uncompressed test images.
+# Real captures here are JPEG-compressed phone photos, downscaled to at
+# most MAX_DETECT_DIM, then cropped to just the detected face (which can
+# be close to MIN_FACE_WIDTH=50px on a legitimately in-focus shot) - both
+# compression and small crop size push Laplacian variance down independent
+# of actual sharpness, since the metric isn't scale-invariant. That was
+# rejecting genuinely clear photos as "too blurry". Lowered to a threshold
+# more appropriate for this pipeline's actual image characteristics; still
+# well above the variance a truly out-of-focus/motion-blurred capture
+# produces. Set FACE_SERVICE_DEBUG=1 to log each capture's measured
+# sharpness value if this needs recalibrating further.
 MAX_DETECT_DIM = 960        # px, longest side - phone photos come in at several
 # thousand px; MTCNN's coarse-to-fine detection cost scales with pixel count,
 # and that (not the ArcFace embedding step, which is constant-cost) is what
