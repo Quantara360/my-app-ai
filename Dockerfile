@@ -8,6 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# CPU-only torch, installed separately from PyTorch's own CPU wheel index -
+# the default PyPI build pulls in CUDA libraries this VPS (no GPU) never
+# uses, ballooning both image size and build time for nothing. Only needed
+# for DeepFace's Fasnet anti-spoofing (liveness) model - see
+# FACE_LIVENESS_CHECK in face_service.py.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
