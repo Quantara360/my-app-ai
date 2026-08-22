@@ -5,3 +5,8 @@ pillow>=10.0.0
 numpy>=1.24.0
 # Use headless variant on servers (no display/GUI required)
 opencv-python-headless>=4.8.0
+# torch is intentionally NOT listed here - it's installed separately in the
+# Dockerfile from the CPU-only wheel index. It's only needed for DeepFace's
+# Fasnet anti-spoofing (liveness) model used by the FACE_LIVENESS_CHECK
+# feature; installing it via the default PyPI index here would pull a much
+# larger CUDA-enabled build this CPU-only VPS will never use.

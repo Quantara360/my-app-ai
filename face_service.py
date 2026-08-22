@@ -111,6 +111,17 @@ MIN_MATCH_MARGIN = 0.05
 # for your camera setups.
 ENFORCE_POSE_AND_DISTANCE = True
 
+# Anti-spoofing (liveness) check on /recognize only - rejects a capture that
+# looks like a photo of a photo (printed, or shown on another screen) rather
+# than a live face in front of the camera. Off by default so it can be
+# switched on (env var, no redeploy needed) once real-world antispoof_score
+# values have been observed via FACE_SERVICE_DEBUG logging - see
+# assess_liveness() below for why this fails OPEN (allows the capture
+# through) if the liveness model itself can't be loaded or run, as opposed to
+# a genuine "not real" verdict, which is always a hard reject regardless of
+# this flag's own failure modes.
+LIVENESS_CHECK_ENABLED = os.environ.get("FACE_LIVENESS_CHECK") == "1"
+
 # ---------------------------------------------------------------------------
 # Quality-control thresholds
 # ---------------------------------------------------------------------------
@@ -237,6 +248,58 @@ def assess_distance(facial_area: dict, img_width: int, img_height: int) -> dict:
         )
 
     return {"is_good_distance": len(reasons) == 0, "reason": "; ".join(reasons) or None}
+
+
+# Lazily built once, then reused - loading it involves importing torch and
+# reading two model weight files off disk (downloading them on first run if
+# not already cached), which is far too slow to redo on every capture.
+# _liveness_load_failed latches so a broken load (missing torch, a failed
+# weight download, etc.) doesn't retry - and therefore doesn't re-log - on
+# every single subsequent request.
+_liveness_model = None
+_liveness_load_failed = False
+
+
+def assess_liveness(image_path: str, facial_area: dict) -> "tuple[bool, float] | None":
+    """
+    Runs the MiniFASNet anti-spoofing model (via DeepFace) against the
+    ORIGINAL full image + the face's bounding box - not the aligned face
+    crop already sitting in face_obj["face"], since the model needs the
+    surrounding context (it samples two crops around the face at different
+    scales) to pick up texture/reflection cues a printed photo or a
+    photographed screen leaves behind.
+
+    Returns (is_real, score), or None if the liveness model itself couldn't
+    be loaded or run - callers must treat None as "skip this check" (fail
+    OPEN), not as a rejection. A broken/missing anti-spoofing model should
+    never be able to block every worker's attendance company-wide; only an
+    actual is_real=False verdict should ever reject a capture.
+    """
+    global _liveness_model, _liveness_load_failed
+
+    if _liveness_model is None:
+        if _liveness_load_failed:
+            return None
+        try:
+            from deepface.modules import modeling
+            _liveness_model = modeling.build_model(task="spoofing", model_name="Fasnet")
+        except Exception:
+            logger.exception(
+                "assess_liveness: failed to load the anti-spoofing model - "
+                "liveness checks will be skipped (fail-open) until this is fixed"
+            )
+            _liveness_load_failed = True
+            return None
+
+    try:
+        from deepface.commons import image_utils
+        img, _ = image_utils.load_image(image_path)
+        fa = (facial_area["x"], facial_area["y"], facial_area["w"], facial_area["h"])
+        is_real, score = _liveness_model.analyze(img=img, facial_area=fa)
+        return bool(is_real), float(score)
+    except Exception:
+        logger.exception("assess_liveness: liveness check errored on this capture - skipping (fail-open)")
+        return None
 
 
 def check_capture_quality(face_obj: dict, img_width: int, img_height: int, check_sharpness: bool = False) -> str:
@@ -400,10 +463,11 @@ def base64_to_image_path(b64_string: str, filename: str) -> str:
     return path
 
 
-def get_embedding(image_path: str, check_sharpness: bool = False) -> list:
+def get_embedding(image_path: str, check_sharpness: bool = False, check_liveness: bool = False) -> list:
     """
     Extract a face embedding using DeepFace + ArcFace, gated by pose,
-    distance-from-camera, and (for registration) blur/lighting checks.
+    distance-from-camera, (for registration) blur/lighting, and (for
+    recognition, when enabled) liveness checks.
 
     Face detection (MTCNN) runs exactly once here. The aligned crop that
     comes back from extract_faces() is reused directly as the input to
@@ -444,6 +508,19 @@ def get_embedding(image_path: str, check_sharpness: bool = False) -> list:
     reject_reason = check_capture_quality(best_face, img_width, img_height, check_sharpness)
     if reject_reason:
         raise ValueError(reject_reason)
+
+    if check_liveness:
+        liveness = assess_liveness(image_path, best_face["facial_area"])
+        if liveness is not None:
+            is_real, antispoof_score = liveness
+            if DEBUG:
+                print(f"[face_service] DEBUG liveness is_real={is_real} score={antispoof_score:.3f}")
+            if not is_real:
+                raise ValueError(
+                    "This looks like a photo of a photo (printed or shown on another screen), "
+                    "not a live face - please take a fresh picture directly of the worker."
+                )
+        # liveness is None -> model unavailable/errored, fail OPEN (see assess_liveness)
 
     # face_obj["face"] is RGB, float [0, 1] (DeepFace convention) - convert
     # back to BGR uint8, the format DeepFace expects for a raw array input.
@@ -566,7 +643,9 @@ def recognize_face():
         # Gate scans on blur/lighting too, not just pose/distance - a dark or
         # blurry probe photo produces an unreliable embedding and should be
         # rejected with a clear reason rather than risk a false match/no-match.
-        probe_embedding = get_embedding(img_path, check_sharpness=True)
+        # Liveness (anti-spoofing) is recognize-only, not registration - see
+        # LIVENESS_CHECK_ENABLED above.
+        probe_embedding = get_embedding(img_path, check_sharpness=True, check_liveness=LIVENESS_CHECK_ENABLED)
     except (ValueError, OSError) as exc:
         # Expected, client-facing: bad/corrupt image data or a failed quality gate.
         return jsonify({"success": False, "error": str(exc)}), 422
